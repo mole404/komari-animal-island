@@ -37,9 +37,15 @@ jobs:
 
           # Validate semantic version format (X.Y.Z)
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Error: Version '$VERSION' is not a valid semantic version (X.Y.Z format)"
-            echo "Expected format: X.Y.Z (e.g., 1.2.3)"
-            exit 1
+            # Manual runs (workflow_dispatch) have no tag: keep the repository version
+            # and only smoke-test the build; the release step stays skipped.
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              echo "Error: Version '$VERSION' is not a valid semantic version (X.Y.Z format)"
+              echo "Expected format: X.Y.Z (e.g., 1.2.3)"
+              exit 1
+            fi
+            VERSION=$(jq -r '.version' komari-theme.json)
+            echo "Not a tag push, keeping repository version: $VERSION"
           fi
 
           echo "Valid semantic version detected: $VERSION"
