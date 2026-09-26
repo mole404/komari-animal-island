@@ -1,12 +1,74 @@
 import { mockLive, mockNodes, mockSettings } from './mock';
 import type { LiveState, NodeInfo, PublicSettings } from './types';
 
-async function request<T>(url: string): Promise<T> {
-  const response = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-  const payload = await response.json();
-  if (payload?.status && payload.status !== 'success') throw new Error(payload.message || '请求失败');
-  return payload?.data ?? payload;
+/** 单次 HTTP 请求超时：避免请求挂起后轮询链永远无法自愈。 */
+const REQUEST_TIMEOUT_MS = 8000;
+/** 逐节点明细请求的并发上限，避免一次性对全部节点全量并发。 */
+const PING_CONCURRENCY = 6;
+/** 旧版 WebSocket 回退连续失败上限，超过后停止刷连接并降级。 */
+const LEGACY_SOCKET_MAX_FAILURES = 5;
+
+type RequestOptions = { signal?: AbortSignal; timeoutMs?: number };
+
+const signalTimeout = (milliseconds: number): AbortSignal | null => {
+  const candidate = (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }).timeout;
+  return typeof candidate === 'function' ? candidate.call(AbortSignal, milliseconds) : null;
+};
+
+/**
+ * 为一次请求生成带超时的 signal：优先使用 AbortSignal.timeout，
+ * 不可用时回退到 setTimeout + AbortController；调用方传入的 signal 会被透传（任一触发即取消）。
+ */
+function timeoutSignal(options: RequestOptions = {}) {
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const external = options.signal;
+  if (!external) {
+    const signal = signalTimeout(timeoutMs);
+    if (signal) return { signal, cleanup: () => undefined };
+  }
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const forwardAbort = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', forwardAbort);
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      window.clearTimeout(timer);
+      external?.removeEventListener('abort', forwardAbort);
+    },
+  };
+}
+
+async function request<T>(url: string, options: RequestOptions = {}): Promise<T> {
+  const { signal, cleanup } = timeoutSignal(options);
+  try {
+    const response = await fetch(url, { headers: { Accept: 'application/json' }, signal });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const payload = await response.json();
+    if (payload?.status && payload.status !== 'success') throw new Error(payload.message || '请求失败');
+    return payload?.data ?? payload;
+  } finally {
+    cleanup();
+  }
+}
+
+/** 受限并发池：按固定上限并发执行 worker，结果顺序与输入一致。 */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const size = Math.max(1, Math.min(limit, items.length));
+  const runners = Array.from({ length: size }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 export async function loadInitialData() {
@@ -28,10 +90,10 @@ type PingRecords = {
 
 export type NetworkLatency = { taskId: number; name: string; latency: number | null };
 
-export async function loadPingLatencies(nodeIds: string[]) {
+export async function loadPingLatencies(nodeIds: string[], signal?: AbortSignal) {
   let hasTasks = false;
   try {
-    const tasks = await request<Array<Record<string, unknown>>>('/api/task/ping');
+    const tasks = await request<Array<Record<string, unknown>>>('/api/task/ping', { signal });
     hasTasks = Array.isArray(tasks) && tasks.some((task) => task.enabled !== false && task.disabled !== true);
   } catch {
     // 旧版 Komari 可能没有公开任务端点，保留历史记录兼容路径。
@@ -42,9 +104,9 @@ export async function loadPingLatencies(nodeIds: string[]) {
     return { values: Object.fromEntries(nodeIds.map((uuid) => [uuid, null])) as Record<string, number | null>, hasTasks: false };
   }
 
-  const entries = await Promise.all(nodeIds.map(async (uuid) => {
+  const entries = await mapWithConcurrency(nodeIds, PING_CONCURRENCY, async (uuid) => {
     try {
-      const data = await request<PingRecords>(`/api/records/ping?uuid=${encodeURIComponent(uuid)}&hours=1`);
+      const data = await request<PingRecords>(`/api/records/ping?uuid=${encodeURIComponent(uuid)}&hours=1`, { signal });
       const taskValues = (data.tasks || []).map((task) => Number(task.avg)).filter((value) => Number.isFinite(value) && value >= 0);
       if (taskValues.length) return [uuid, Math.round(taskValues.reduce((sum, value) => sum + value, 0) / taskValues.length)] as const;
       const latest = [...(data.records || [])].reverse().find((record) => Number(record.value) >= 0);
@@ -52,16 +114,16 @@ export async function loadPingLatencies(nodeIds: string[]) {
     } catch {
       return [uuid, null] as const;
     }
-  }));
+  });
   return { values: Object.fromEntries(entries) as Record<string, number | null>, hasTasks: true };
 }
 
-export async function loadNetworkLatencies(nodeIds: string[], taskNames: string[]) {
+export async function loadNetworkLatencies(nodeIds: string[], taskNames: string[], signal?: AbortSignal) {
   const normalizedNames = [...new Set(taskNames.map((name) => name.trim()).filter(Boolean))];
   if (!normalizedNames.length) return {} as Record<string, NetworkLatency[]>;
   let activeTaskNames: Set<string> | null = null;
   try {
-    const activeTasks = await request<Array<{ name?: string; enabled?: boolean; disabled?: boolean }>>('/api/task/ping');
+    const activeTasks = await request<Array<{ name?: string; enabled?: boolean; disabled?: boolean }>>('/api/task/ping', { signal });
     activeTaskNames = new Set(activeTasks
       .filter((task) => task.enabled !== false && task.disabled !== true)
       .map((task) => task.name?.trim())
@@ -70,9 +132,9 @@ export async function loadNetworkLatencies(nodeIds: string[], taskNames: string[
     // 旧版或未公开任务端点时，使用记录接口返回的任务列表。
   }
 
-  const entries = await Promise.all(nodeIds.map(async (uuid) => {
+  const entries = await mapWithConcurrency(nodeIds, PING_CONCURRENCY, async (uuid) => {
     try {
-      const data = await request<PingRecords>(`/api/records/ping?uuid=${encodeURIComponent(uuid)}&hours=1`);
+      const data = await request<PingRecords>(`/api/records/ping?uuid=${encodeURIComponent(uuid)}&hours=1`, { signal });
       const tasks = data.tasks || [];
       const records = data.records || [];
       const values = normalizedNames.flatMap<NetworkLatency>((configuredName) => {
@@ -96,9 +158,22 @@ export async function loadNetworkLatencies(nodeIds: string[], taskNames: string[
     } catch {
       return [uuid, []] as const;
     }
-  }));
+  });
   return Object.fromEntries(entries) as Record<string, NetworkLatency[]>;
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** 归一化旧版 WebSocket 帧：online 必须是字符串数组，否则从 data 的 keys 推导。 */
+const normalizeLegacyFrame = (payload: unknown) => {
+  if (!isRecord(payload) || !isRecord(payload.data)) return null;
+  const live = payload.data as Record<string, LiveState>;
+  const online = Array.isArray(payload.online)
+    ? payload.online.map((uuid: unknown) => String(uuid))
+    : Object.keys(live);
+  return { online, live };
+};
 
 export function connectLive(
   onData: (online: string[], live: Record<string, LiveState>) => void,
@@ -107,9 +182,13 @@ export function connectLive(
 ) {
   if (!location.protocol.startsWith('http')) return () => undefined;
   const interval = Math.max(1000, Math.min(60000, requestedInterval));
+  // 单次轮询请求超时：至少 5s，且不小于轮询间隔，避免正常的长间隔被误判超时。
+  const pollTimeout = Math.max(5000, interval);
   let timer: number | undefined;
   let controller: AbortController | undefined;
+  let timeoutTimer: number | undefined;
   let legacySocket: WebSocket | undefined;
+  let legacyFailures = 0;
   let stopped = false;
   let running = false;
   let requestId = 0;
@@ -119,34 +198,61 @@ export function connectLive(
   };
 
   const openLegacySocket = () => {
+    if (stopped || legacyFailures >= LEGACY_SOCKET_MAX_FAILURES) return;
     if (legacySocket && legacySocket.readyState < WebSocket.CLOSING) return;
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    legacySocket = new WebSocket(`${scheme}//${location.host}/api/clients`);
-    legacySocket.onopen = () => legacySocket?.send('get');
-    legacySocket.onmessage = (event) => {
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(`${scheme}//${location.host}/api/clients`);
+    } catch {
+      // 构造失败（地址非法、被策略拦截等）：计数并放弃本轮，不再抛未处理拒绝。
+      legacyFailures += 1;
+      legacySocket = undefined;
+      return;
+    }
+    legacySocket = socket;
+    let opened = false;
+    socket.onopen = () => {
+      opened = true;
+      legacyFailures = 0;
+      socket.send('get');
+    };
+    socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
         const payload = message?.data?.data ? message.data : message?.data;
-        if (payload?.data && !stopped) {
-          onData(payload.online ?? [], payload.data);
+        const frame = normalizeLegacyFrame(payload);
+        if (frame && !stopped) {
+          // 收到有效数据即认为回退通道恢复。
+          legacyFailures = 0;
+          onData(frame.online, frame.live);
           onStatus(true);
         }
       } catch { /* ignore malformed legacy frames */ }
     };
-    legacySocket.onerror = () => legacySocket?.close();
-    legacySocket.onclose = () => { legacySocket = undefined; };
+    socket.onerror = () => { legacyFailures += 1; socket.close(); };
+    socket.onclose = () => {
+      if (!opened) legacyFailures += 1;
+      if (legacySocket === socket) legacySocket = undefined;
+    };
   };
 
   const refresh = async () => {
     if (stopped || running || document.hidden) return;
     running = true;
-    controller = new AbortController();
+    const active = new AbortController();
+    controller = active;
+    let timedOut = false;
+    timeoutTimer = window.setTimeout(() => {
+      timedOut = true;
+      active.abort();
+    }, pollTimeout);
     try {
       const response = await fetch('/api/rpc2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', method: 'common:getNodesLatestStatus', id: ++requestId }),
-        signal: controller.signal,
+        signal: active.signal,
       });
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       const payload = await response.json();
@@ -196,13 +302,17 @@ export function connectLive(
         onStatus(true);
       }
     } catch (error) {
-      if (!stopped && !(error instanceof DOMException && error.name === 'AbortError')) {
+      const aborted = error instanceof DOMException && error.name === 'AbortError';
+      // 只有「超时主动 abort」才视为连接异常；清理时的 abort（stopped）不改变状态。
+      if (!stopped && (!aborted || timedOut)) {
         onStatus(false);
         openLegacySocket();
       }
     } finally {
-      running = false;
+      if (timeoutTimer !== undefined) window.clearTimeout(timeoutTimer);
+      timeoutTimer = undefined;
       controller = undefined;
+      running = false;
       schedule();
     }
   };
@@ -218,6 +328,7 @@ export function connectLive(
   return () => {
     stopped = true;
     if (timer) window.clearTimeout(timer);
+    if (timeoutTimer !== undefined) window.clearTimeout(timeoutTimer);
     controller?.abort();
     legacySocket?.close();
     document.removeEventListener('visibilitychange', handleVisibility);

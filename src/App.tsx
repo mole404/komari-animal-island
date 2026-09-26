@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BackTop, Button, Card, Cursor, Divider, Drawer, Footer, Form, FormItem, Icon,
   Image, Input, Loading, Modal, Notification, Progress, Radio, Select, Tag, Time,
@@ -55,6 +55,54 @@ const normalizeSortMode = (value?: string): SortMode => {
   return SORT_OPTIONS.some((item) => item.key === value) ? value as SortMode : 'default';
 };
 
+const TRUE_BOOL_VALUES = new Set(['true', '1', 'on', 'yes', 'y', '开', '开启', '是', '启用']);
+const FALSE_BOOL_VALUES = new Set(['false', '0', 'off', 'no', 'n', '关', '关闭', '否', '禁用']);
+
+/** 宽松布尔解析：兼容 boolean、1/0、'true'/'false'/'off'/'关闭' 等后端可能下发的形式。 */
+const asBool = (value: unknown, fallback = false): boolean => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value !== 0 : fallback;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return fallback;
+    if (TRUE_BOOL_VALUES.has(normalized)) return true;
+    if (FALSE_BOOL_VALUES.has(normalized)) return false;
+  }
+  return fallback;
+};
+
+const DEFAULT_UPDATE_INTERVAL_SECONDS = 3;
+/** 先判 null/undefined/空串（Number 会得到 0），再把非法值回退到默认 3 秒并夹在 1-60 之间。 */
+const normalizeUpdateInterval = (value: unknown): number => {
+  if (value === null || value === undefined) return DEFAULT_UPDATE_INTERVAL_SECONDS;
+  if (typeof value === 'string' && !value.trim()) return DEFAULT_UPDATE_INTERVAL_SECONDS;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_UPDATE_INTERVAL_SECONDS;
+  return Math.max(1, Math.min(60, parsed));
+};
+
+/** 隐私模式下 localStorage 读写会抛错，统一包一层避免白屏。 */
+const safeStorage = {
+  get(key: string): string | null {
+    try {
+      return typeof window === 'undefined' ? null : window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  set(key: string, value: string): void {
+    try {
+      if (typeof window !== 'undefined') window.localStorage.setItem(key, value);
+    } catch {
+      // 存储不可用时静默忽略：偏好只是可选增强。
+    }
+  },
+};
+
+const brandLogoPattern = /^(?:https?:\/\/|data:image\/|\/|\.\.?\/)/i;
+/** 放宽 Logo 校验：接受 http(s)、data:image、同源相对路径（含带查询参数的代理地址与无扩展名图床）。 */
+const isSupportedBrandLogo = (value: string) => brandLogoPattern.test(value);
+
 const clamp = (value: number) => Math.max(0, Math.min(100, value));
 const percent = (used = 0, total = 0) => total > 0 ? clamp((used / total) * 100) : 0;
 const formatPercent = (value = 0) => `${Math.round(value)}%`;
@@ -71,8 +119,14 @@ const liveLatency = (state?: LiveState) => {
   return values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
 };
 const latencyColor = (latency: number) => latency <= 150 ? 'app-green' : latency <= 300 ? 'app-yellow' : 'app-red';
-const hasBilling = (node: NodeInfo) => Number(node.price) > 0 && Number(node.billing_cycle) !== 0;
+const hasBilling = (node: NodeInfo) => {
+  const price = Number(node.price);
+  const cycle = Number(node.billing_cycle);
+  // 价格与计费周期都必须是有限数：字段缺失时 Number(undefined) 为 NaN，不能误判为「有账单」。
+  return Number.isFinite(price) && price > 0 && Number.isFinite(cycle) && cycle !== 0;
+};
 const billingCycleLabel = (cycle = 0) => {
+  if (!Number.isFinite(cycle)) return '—';
   if (cycle === -1) return '一次性付费';
   const presets: Record<number, string> = { 30: '每月', 92: '每季', 365: '每年', 730: '每两年' };
   return presets[cycle] || `每 ${cycle} 天`;
@@ -191,14 +245,14 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState('');
   const [requireTwoFactor, setRequireTwoFactor] = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
+  // 惰性初始值只读取，自增背景变体的副作用移到 useEffect，避免在渲染阶段写 localStorage。
   const [backgroundVariant] = useState(() => {
-    const previous = Number.parseInt(localStorage.getItem('animal-bg-variant') || '-1', 10);
-    const next = Number.isFinite(previous) ? (previous + 1) % 4 : 0;
-    localStorage.setItem('animal-bg-variant', String(next));
-    return next;
+    const previous = Number.parseInt(safeStorage.get('animal-bg-variant') ?? '-1', 10);
+    return Number.isFinite(previous) ? (previous + 1) % 4 : 0;
   });
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(() => {
-    const saved = localStorage.getItem('appearance');
+    const saved = safeStorage.get('appearance');
     return saved === 'dark' || saved === 'light' || saved === 'system' ? saved : 'system';
   });
   const [systemPrefersDark, setSystemPrefersDark] = useState(() =>
@@ -222,18 +276,36 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    loadInitialData().then((data) => {
+    let splashTimer: number | undefined;
+    // 兜底定时器：接口请求最长 8s，即使 Promise 永不 settle 也必须关掉全屏 splash。
+    const splashFallback = window.setTimeout(() => { if (mounted) setLoading(false); }, 12000);
+    const finishLoading = (delay: number) => {
       if (!mounted) return;
-      setSettings(data.settings); setNodes(data.nodes); setLive(data.live); setDemo(data.demo);
-      if (data.demo) setOnline(Object.keys(data.live));
-      window.setTimeout(() => setLoading(false), 650);
-    });
-    return () => { mounted = false; };
+      window.clearTimeout(splashFallback);
+      splashTimer = window.setTimeout(() => { if (mounted) setLoading(false); }, delay);
+    };
+    loadInitialData()
+      .then((data) => {
+        if (!mounted) return;
+        setSettings(data.settings); setNodes(data.nodes); setLive(data.live); setDemo(data.demo);
+        if (data.demo) setOnline(Object.keys(data.live));
+        finishLoading(650);
+      })
+      .catch(() => { if (mounted) setLoading(false); });
+    return () => {
+      mounted = false;
+      window.clearTimeout(splashFallback);
+      if (splashTimer !== undefined) window.clearTimeout(splashTimer);
+    };
   }, []);
 
-  const configuredUpdateInterval = Number(settings.theme_settings?.data_update_interval);
-  const updateIntervalSeconds = Number.isFinite(configuredUpdateInterval)
-    ? Math.max(1, Math.min(60, configuredUpdateInterval)) : 3;
+  const theme = settings.theme_settings ?? {};
+  const updateIntervalSeconds = normalizeUpdateInterval(settings.theme_settings?.data_update_interval);
+  /** 在线判定统一入口：卡片、列表、排序、详情弹窗共用，demo 预览数据同样按 live 判定。 */
+  const isOnline = useCallback(
+    (uuid: string) => (demo ? Boolean(live[uuid]) : online.includes(uuid)),
+    [demo, live, online],
+  );
 
   useEffect(() => connectLive((nextOnline, nextLive) => {
     setOnline(nextOnline); setLive(nextLive); setDemo(false);
@@ -243,12 +315,15 @@ export default function App() {
     setSortMode(normalizeSortMode(settings.theme_settings?.default_sort));
   }, [settings.theme_settings?.default_sort]);
 
-  const showNetworkLatency = settings.theme_settings?.show_network_latency === true;
-  const networkLatencyNames = useMemo(() => (settings.theme_settings?.network_latency_order || '')
+  const showNetworkLatency = asBool(theme.show_network_latency);
+  const networkLatencyNames = useMemo(() => (theme.network_latency_order || '')
     .split(/[,，]/)
     .map((name) => name.trim())
-    .filter(Boolean), [settings.theme_settings?.network_latency_order]);
-  const showLatency = settings.theme_settings?.show_latency === true && !showNetworkLatency;
+    .filter(Boolean), [theme.network_latency_order]);
+  const showLatency = asBool(theme.show_latency) && !showNetworkLatency;
+  const offlineNodesLast = asBool(theme.offline_nodes_last, true);
+  const showIcp = asBool(theme.show_icp);
+  const showPoliceFiling = asBool(theme.show_police_filing);
 
   useEffect(() => {
     if (!showLatency || !nodes.length || demo) {
@@ -257,16 +332,20 @@ export default function App() {
       return;
     }
     let active = true;
+    let controller: AbortController | undefined;
     const refresh = async () => {
-      const result = await loadPingLatencies(nodes.map((node) => node.uuid));
-      if (active) {
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      const result = await loadPingLatencies(nodes.map((node) => node.uuid), current.signal);
+      if (active && controller === current) {
         setLatencies(result.values);
         setPingTasksActive(result.hasTasks);
       }
     };
     void refresh();
     const timer = window.setInterval(refresh, 15000);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => { active = false; controller?.abort(); window.clearInterval(timer); };
   }, [nodes, demo, showLatency]);
 
   useEffect(() => {
@@ -275,13 +354,17 @@ export default function App() {
       return;
     }
     let active = true;
+    let controller: AbortController | undefined;
     const refresh = async () => {
-      const values = await loadNetworkLatencies(nodes.map((node) => node.uuid), networkLatencyNames);
-      if (active) setNetworkLatencies(values);
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      const values = await loadNetworkLatencies(nodes.map((node) => node.uuid), networkLatencyNames, current.signal);
+      if (active && controller === current) setNetworkLatencies(values);
     };
     void refresh();
     const timer = window.setInterval(refresh, 15000);
-    return () => { active = false; window.clearInterval(timer); };
+    return () => { active = false; controller?.abort(); window.clearInterval(timer); };
   }, [nodes, demo, showNetworkLatency, networkLatencyNames.join('\u0000')]);
 
   useEffect(() => {
@@ -289,8 +372,12 @@ export default function App() {
   }, [appearance]);
 
   useEffect(() => {
-    localStorage.setItem('appearance', appearanceMode);
+    safeStorage.set('appearance', appearanceMode);
   }, [appearanceMode]);
+
+  useEffect(() => {
+    safeStorage.set('animal-bg-variant', String(backgroundVariant));
+  }, [backgroundVariant]);
 
   useEffect(() => {
     document.body.classList.add('animal-cursor--force');
@@ -302,9 +389,9 @@ export default function App() {
     const text = `${node.name} ${node.region || ''} ${regionLabel(node.region)} ${node.group || ''}`.toLowerCase();
     return (group === 'all' || regionCode(node.region) === group) && text.includes(query.trim().toLowerCase());
   }).sort((left, right) => {
-    const leftOnline = demo ? Boolean(live[left.uuid]) : online.includes(left.uuid);
-    const rightOnline = demo ? Boolean(live[right.uuid]) : online.includes(right.uuid);
-    if (settings.theme_settings?.offline_nodes_last !== false && leftOnline !== rightOnline) return leftOnline ? -1 : 1;
+    const leftOnline = isOnline(left.uuid);
+    const rightOnline = isOnline(right.uuid);
+    if (offlineNodesLast && leftOnline !== rightOnline) return leftOnline ? -1 : 1;
     if (sortMode === 'default') return 0;
     const leftLive = live[left.uuid];
     const rightLive = live[right.uuid];
@@ -315,7 +402,7 @@ export default function App() {
     else if (sortMode === 'network-desc') difference = ((rightLive?.network?.down || 0) + (rightLive?.network?.up || 0)) - ((leftLive?.network?.down || 0) + (leftLive?.network?.up || 0));
     else difference = left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' });
     return difference || left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' });
-  }), [nodes, group, query, sortMode, live, online, demo, settings.theme_settings?.offline_nodes_last]);
+  }), [nodes, group, query, sortMode, live, isOnline, offlineNodesLast]);
   const onlineCount = demo ? Object.keys(live).length : online.length;
   const liveValues = Object.values(live);
   const averageCpu = liveValues.length ? liveValues.reduce((sum, state) => sum + (state.cpu?.usage || 0), 0) / liveValues.length : 0;
@@ -324,15 +411,18 @@ export default function App() {
   const speedDown = liveValues.reduce((sum, state) => sum + (state.network?.down || 0), 0);
   const speedUp = liveValues.reduce((sum, state) => sum + (state.network?.up || 0), 0);
   const current = selected ? live[selected.uuid] : undefined;
-  const theme = settings.theme_settings ?? {};
   const brandTitle = theme.brand_title?.trim() || '机机森友会';
   const brandSubtitle = theme.brand_subtitle?.trim() || '集合啦！';
   const brandLogo = theme.brand_logo_url?.trim() || 'https://wsrv.nl/?url=https%3A%2F%2Fi.mij.rip%2F2026%2F08%2F18%2F3b1499d288d87344ca7a7a0de8c1434d.png';
-  const validBrandLogo = brandLogo && (/^data:image\/png(?:;base64)?,/i.test(brandLogo) || /\.png(?:$|[?#])/i.test(brandLogo));
+  const validBrandLogo = brandLogo.length > 0 && isSupportedBrandLogo(brandLogo);
 
   useEffect(() => {
     document.title = brandTitle;
   }, [brandTitle]);
+
+  useEffect(() => {
+    setLogoFailed(false);
+  }, [brandLogo]);
 
   const openResidentLogin = async () => {
     try {
@@ -399,16 +489,22 @@ export default function App() {
       <div className={`km-layout bg-variant-${backgroundVariant}`}>
         <header className="km-navbar">
           <div className="brand">
-            {validBrandLogo ? <img className="brand-logo" src={brandLogo} alt="" /> : <Icon name="icon-helicopter" size={60} bounce />}
+            {validBrandLogo && !logoFailed ? <img className="brand-logo" src={brandLogo} alt="" onError={() => setLogoFailed(true)} /> : <Icon name="icon-helicopter" size={60} bounce />}
             <div className="brand-copy">
               <div className="brand-tiles" aria-label={brandTitle}>{[...brandTitle].map((char, index) => <Tag key={`${char}-${index}`} size="medium" color={BRAND_COLORS[index % BRAND_COLORS.length]} variant="solid">{char === ' ' ? '\u00a0' : char}</Tag>)}</div>
               <span>{brandSubtitle}</span>
             </div>
           </div>
           <div className="header-actions">
-            <Tag color={connected ? 'app-green' : demo ? 'app-yellow' : 'app-red'} size="small">
-              {connected ? '实时连接' : demo ? '预览数据' : '正在重连'}
-            </Tag>
+            <span
+              className="connection-status"
+              title={demo ? '接口不可用，正在展示预览数据' : undefined}
+              aria-label={demo ? '预览数据：接口不可用，正在展示预览数据' : undefined}
+            >
+              <Tag color={connected ? 'app-green' : demo ? 'app-yellow' : 'app-red'} size="small">
+                {connected ? '实时连接' : demo ? '预览数据' : '正在重连'}
+              </Tag>
+            </span>
             <Button type="primary" size="small" icon={<Icon name="icon-design" size={19} />} onClick={() => setDrawer(true)}>设置</Button>
             <Button type="primary" size="small" icon={<Icon name="icon-variant" size={19} />} onClick={openResidentLogin}>岛民</Button>
             <Time type="hud" />
@@ -416,7 +512,7 @@ export default function App() {
         </header>
 
         <main className="km-main km-page-instance">
-          {theme.show_dashboard !== false && (
+          {asBool(theme.show_dashboard, true) && (
             <section className="dashboard-section">
               <Title size="middle" color="app-yellow">监控概览</Title>
               <div className="stats-grid">
@@ -442,8 +538,8 @@ export default function App() {
             {visibleNodes.length ? (
               <div className={`node-grid ${view === 'list' ? 'list-view' : ''}`}>
                 {visibleNodes.map((node) => view === 'list'
-                  ? <NodeListRow key={`${node.uuid}-${live[node.uuid]?.updated_at || ''}`} node={node} live={live[node.uuid]} online={demo ? Boolean(live[node.uuid]) : online.includes(node.uuid)} networkLatencies={showNetworkLatency ? networkLatencies[node.uuid] : []} onDetails={() => setSelected(node)} />
-                  : <NodeCard key={`${node.uuid}-${live[node.uuid]?.updated_at || ''}`} node={node} live={live[node.uuid]} online={demo ? Boolean(live[node.uuid]) : online.includes(node.uuid)} latency={latencies[node.uuid]} networkLatencies={showNetworkLatency ? networkLatencies[node.uuid] : []} showLatency={showLatency && pingTasksActive} onDetails={() => setSelected(node)} />)}
+                  ? <NodeListRow key={node.uuid} node={node} live={live[node.uuid]} online={isOnline(node.uuid)} networkLatencies={showNetworkLatency ? networkLatencies[node.uuid] : []} onDetails={() => setSelected(node)} />
+                  : <NodeCard key={node.uuid} node={node} live={live[node.uuid]} online={isOnline(node.uuid)} latency={latencies[node.uuid]} networkLatencies={showNetworkLatency ? networkLatencies[node.uuid] : []} showLatency={showLatency && pingTasksActive} onDetails={() => setSelected(node)} />)}
               </div>
             ) : (
               <Card type="dashed" className="empty-state"><Icon name="icon-map" size={54} /><h2>这片岛屿上没有找到服务器</h2><Button type="primary" onClick={() => { setQuery(''); setGroup('all'); }}>清除筛选</Button></Card>
@@ -451,22 +547,22 @@ export default function App() {
           </section>
         </main>
 
-        {theme.show_footer !== false && (
+        {asBool(theme.show_footer, true) && (
           <footer className="km-footer">
-            <Button type="primary" block className="footer-link-button" onClick={() => { window.location.href = 'https://github.com/imbigbomb/komari-animal-island'; }}>
+            <Button type="primary" block className="footer-link-button" onClick={() => { window.location.href = 'https://github.com/mole404/komari-animal-island'; }}>
               <span>{theme.footer_content || '每台服务器，都是这座岛上的好邻居。'}</span>
               <span>Powered by Komari Monitor.</span>
             </Button>
-            {((theme.show_icp && theme.icp_number?.trim()) || (theme.show_police_filing && theme.police_filing_number?.trim())) && <div className="filing-links">
-              {(theme.show_icp && theme.icp_number?.trim()) && <a href={theme.icp_url?.trim() || 'https://beian.miit.gov.cn/'} target="_blank" rel="noreferrer">{theme.icp_number}</a>}
-              {(theme.show_police_filing && theme.police_filing_number?.trim()) && <a href={theme.police_filing_url?.trim() || undefined} target={theme.police_filing_url?.trim() ? '_blank' : undefined} rel="noreferrer"><img src={policeBadge} alt="" />{theme.police_filing_number}</a>}
+            {((showIcp && theme.icp_number?.trim()) || (showPoliceFiling && theme.police_filing_number?.trim())) && <div className="filing-links">
+              {(showIcp && theme.icp_number?.trim()) && <a href={theme.icp_url?.trim() || 'https://beian.miit.gov.cn/'} target="_blank" rel="noreferrer">{theme.icp_number}</a>}
+              {(showPoliceFiling && theme.police_filing_number?.trim()) && <a href={theme.police_filing_url?.trim() || undefined} target={theme.police_filing_url?.trim() ? '_blank' : undefined} rel="noreferrer"><img src={policeBadge} alt="" />{theme.police_filing_number}</a>}
             </div>}
             <Footer type="sea" />
           </footer>
         )}
       </div>
 
-      <Modal open={Boolean(selected)} width="min(680px, calc(100vw - 64px))" className="detail-modal" maskStyle={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 32 }} title={selected && <div className="detail-header"><div className="detail-heading-copy"><strong>{selected.name}</strong><span>{selected.os || '未知系统版本'}</span></div><div className="detail-tags"><Tag color="app-green">{online.includes(selected.uuid) || demo ? '在线' : '离线'}</Tag><Tag color="app-blue">{regionLabel(selected.region)}</Tag><Tag color="app-blue">{selected.virtualization || '未知虚拟化'}</Tag><Tag color="app-blue">{selected.arch || '未知架构'}</Tag></div></div>} onClose={() => setSelected(null)} footer={<Button type="primary" onClick={() => setSelected(null)}>回到岛屿</Button>} typewriter={false}>
+      <Modal open={Boolean(selected)} width="min(680px, calc(100vw - 64px))" className="detail-modal" maskStyle={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 32 }} title={selected && <div className="detail-header"><div className="detail-heading-copy"><strong>{selected.name}</strong><span>{selected.os || '未知系统版本'}</span></div><div className="detail-tags"><Tag color="app-green">{isOnline(selected.uuid) ? '在线' : '离线'}</Tag><Tag color="app-blue">{regionLabel(selected.region)}</Tag><Tag color="app-blue">{selected.virtualization || '未知虚拟化'}</Tag><Tag color="app-blue">{selected.arch || '未知架构'}</Tag></div></div>} onClose={() => setSelected(null)} footer={<Button type="primary" onClick={() => setSelected(null)}>回到岛屿</Button>} typewriter={false}>
         {selected && <div className="details">
           <div className="detail-copy">
             {selected.public_remark && <p>{selected.public_remark}</p>}

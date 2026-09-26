@@ -24,7 +24,7 @@
 }
 
 * { box-sizing: border-box; }
-.animal-cursor--force, .animal-cursor--force * { cursor: url('../files/cursor-icon.1ea93a65.png') 4 0, default !important; }
+.animal-cursor--force, .animal-cursor--force * { cursor: url('../files/cursor-icon.png') 4 0, default !important; }
 html { scroll-behavior: smooth; background: var(--animal-bg, var(--animal-bg-color)); }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--animal-bg, var(--animal-bg-color)); color: var(--animal-text-color); font-family: var(--animal-font-family); font-weight: 500; }
 .loading-screen { position: fixed !important; inset: 0; z-index: 9999; width: 100% !important; height: 100dvh !important; max-height: 100dvh; padding-bottom: max(48px, env(safe-area-inset-bottom)) !important; overflow: clip !important; }
@@ -196,3 +196,7 @@ button, input { font: inherit; }
   html { scroll-behavior: auto; }
 }
 
+.root-error-fallback { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 32px; text-align: center; background: var(--animal-bg, var(--animal-bg-color)); color: var(--animal-text-color); }
+.root-error-fallback h1 { margin: 0; font-size: 22px; }
+.root-error-fallback p { margin: 0; opacity: .85; }
+.root-error-fallback button { padding: 8px 22px; border-radius: 999px; border: 2px solid rgba(36, 95, 82, .35); background: #f7f1df; color: #245f52; font: inherit; font-weight: 700; cursor: pointer; }
