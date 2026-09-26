@@ -7,7 +7,7 @@
 使用 Animal Island UI 构建的温暖游戏风简单的 Komari 监控主题。
 
 作者：**JeraldMaster**<br>
-开发：**OpenAI Codex**
+开发：**OpenAI Codex / DeepSeek Flash**
 
 ## 功能
 
