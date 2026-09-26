@@ -7,7 +7,7 @@
 A simple and cozy game-style Komari monitoring theme built with Animal Island UI.
 
 Author: **JeraldMaster**<br>
-Developed by **OpenAI Codex**
+Developed by **OpenAI Codex / DeepSeek Flash**
 
 ## Features
 
