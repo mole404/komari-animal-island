@@ -14,8 +14,8 @@
 - 动物岛风格的监控概览、服务器卡片、列表和详情弹窗
 - Komari RPC2 实时数据刷新，并兼容旧版实时接口
 - 自定义数据刷新间隔，默认 3 秒
-- 名称、CPU、内存和网络速率排序，可默认将离线节点后置
-- 地区筛选、服务器搜索、明暗模式和托管主题设置
+- 默认顺序、名称、CPU、内存和网络速率排序，可默认将离线节点后置
+- 地区筛选、服务器搜索、跟随系统/明暗模式和托管主题设置
 - 单线路延迟及按任务名称匹配的三网延迟显示
 - 服务器计费周期、续期日期、剩余价值和 Animal Island UI Wallet
 - 自定义标题、描述和 PNG Logo
@@ -24,7 +24,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/imbigbomb/komari-animal-island/releases) 下载最新的 `AnimalIsland-版本号.zip`，在 Komari 后台的主题管理中上传并启用。
+从 [Releases](https://github.com/mole404/komari-animal-island/releases) 下载最新的 `AnimalIsland-版本号.zip`，在 Komari 后台的主题管理中上传并启用。
 
 请勿使用 GitHub 自动生成的 Source code 压缩包。
 

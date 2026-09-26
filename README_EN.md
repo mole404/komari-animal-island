@@ -14,8 +14,8 @@ Developed by **OpenAI Codex**
 - Animal Island styled dashboard, server cards, list view, and detail modal
 - Komari RPC2 live updates with compatibility for the legacy live API
 - Configurable data refresh interval, defaulting to 3 seconds
-- Sorting by name, CPU, memory, or network speed, with offline nodes placed last by default
-- Region filtering, server search, light/dark appearance, and managed theme settings
+- Sorting by node-management order, name, CPU, memory, or network speed, with offline nodes placed last by default
+- Region filtering, server search, system/light/dark appearance, and managed theme settings
 - Single-line latency and task-name-matched three-network latency
 - Billing cycle, renewal date, remaining value, and Animal Island UI Wallet display
 - Custom title, subtitle, and PNG logo
@@ -24,7 +24,7 @@ Developed by **OpenAI Codex**
 
 ## Installation
 
-Download the latest `AnimalIsland-version.zip` from [Releases](https://github.com/imbigbomb/komari-animal-island/releases), then upload and enable it in Komari Theme Management.
+Download the latest `AnimalIsland-version.zip` from [Releases](https://github.com/mole404/komari-animal-island/releases), then upload and enable it in Komari Theme Management.
 
 Do not use GitHub's automatically generated Source code archives.
 

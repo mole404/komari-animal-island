@@ -2,9 +2,9 @@
   "name": "Komari Animal Island",
   "short": "AnimalIsland",
   "description": "使用 Animal Island UI 构建的温暖游戏风简单的 Komari 监控主题。",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "author": "JeraldMaster",
-  "url": "https://github.com/imbigbomb/komari-animal-island",
+  "url": "https://github.com/mole404/komari-animal-island",
   "preview": "preview.png",
   "configuration": {
     "type": "managed",
@@ -57,9 +57,9 @@
         "key": "default_sort",
         "name": { "zh-CN": "默认服务器排序", "en": "Default server sorting" },
         "type": "select",
-        "default": "名称 A-Z",
-        "options": "名称 A-Z,名称 Z-A,CPU 高到低,内存高到低,网络速率高到低",
-        "help": { "zh-CN": "依次对应：名称 A-Z、名称 Z-A、CPU 高到低、内存高到低、网络速率高到低。访客仍可在服务器列表上方临时切换。", "en": "Name A-Z, name Z-A, CPU, memory, or network usage descending." }
+        "default": "默认顺序",
+        "options": "默认顺序,名称 A-Z,名称 Z-A,CPU 高到低,内存高到低,网络速率高到低",
+        "help": { "zh-CN": "默认顺序为节点管理中配置的原始顺序，其余依次对应：名称 A-Z、名称 Z-A、CPU 高到低、内存高到低、网络速率高到低。访客仍可在服务器列表上方临时切换。", "en": "\"默认顺序\" keeps the order configured in node management; other options sort by name, CPU, memory, or network usage. Visitors can still switch it temporarily above the server list." }
       },
       {
         "key": "show_latency",

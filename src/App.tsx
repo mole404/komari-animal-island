@@ -13,7 +13,8 @@ import type { LiveState, NodeInfo, PublicSettings } from './types';
 
 type ViewMode = 'grid' | 'list';
 type Appearance = 'light' | 'dark';
-type SortMode = 'name-asc' | 'name-desc' | 'cpu-desc' | 'memory-desc' | 'network-desc';
+type AppearanceMode = Appearance | 'system';
+type SortMode = 'default' | 'name-asc' | 'name-desc' | 'cpu-desc' | 'memory-desc' | 'network-desc';
 type LoginValues = { username?: string; password?: string; twoFactor?: string };
 
 const REGION_NAMES: Record<string, string> = {
@@ -38,6 +39,7 @@ const regionLabel = (region = '') => {
 };
 const BRAND_COLORS = ['app-green', 'app-yellow', 'app-orange', 'app-blue', 'app-pink', 'app-teal'] as const;
 const SORT_OPTIONS: { key: SortMode; label: string }[] = [
+  { key: 'default', label: '默认顺序' },
   { key: 'name-asc', label: '名称 A-Z' },
   { key: 'name-desc', label: '名称 Z-A' },
   { key: 'cpu-desc', label: 'CPU 高到低' },
@@ -45,12 +47,12 @@ const SORT_OPTIONS: { key: SortMode; label: string }[] = [
   { key: 'network-desc', label: '网络速率高到低' },
 ];
 const SORT_SETTING_VALUES: Record<string, SortMode> = {
-  '名称 A-Z': 'name-asc', '名称 Z-A': 'name-desc', 'CPU 高到低': 'cpu-desc',
+  '默认顺序': 'default', '名称 A-Z': 'name-asc', '名称 Z-A': 'name-desc', 'CPU 高到低': 'cpu-desc',
   '内存高到低': 'memory-desc', '网络速率高到低': 'network-desc',
 };
 const normalizeSortMode = (value?: string): SortMode => {
   if (value && SORT_SETTING_VALUES[value]) return SORT_SETTING_VALUES[value];
-  return SORT_OPTIONS.some((item) => item.key === value) ? value as SortMode : 'name-asc';
+  return SORT_OPTIONS.some((item) => item.key === value) ? value as SortMode : 'default';
 };
 
 const clamp = (value: number) => Math.max(0, Math.min(100, value));
@@ -182,7 +184,7 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState('all');
   const [view, setView] = useState<ViewMode>('grid');
-  const [sortMode, setSortMode] = useState<SortMode>('name-asc');
+  const [sortMode, setSortMode] = useState<SortMode>('default');
   const [selected, setSelected] = useState<NodeInfo | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -195,8 +197,28 @@ export default function App() {
     localStorage.setItem('animal-bg-variant', String(next));
     return next;
   });
-  const [appearance, setAppearance] = useState<Appearance>(() =>
-    localStorage.getItem('appearance') === 'dark' ? 'dark' : 'light');
+  const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(() => {
+    const saved = localStorage.getItem('appearance');
+    return saved === 'dark' || saved === 'light' || saved === 'system' ? saved : 'system';
+  });
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches : false);
+  const appearance: Appearance = appearanceMode === 'system'
+    ? (systemPrefersDark ? 'dark' : 'light') : appearanceMode;
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (event: MediaQueryListEvent) => setSystemPrefersDark(event.matches);
+    setSystemPrefersDark(media.matches);
+    if (media.addEventListener) media.addEventListener('change', handleChange);
+    else media.addListener(handleChange);
+    return () => {
+      if (media.removeEventListener) media.removeEventListener('change', handleChange);
+      else media.removeListener(handleChange);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -264,8 +286,11 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.appearance = appearance;
-    localStorage.setItem('appearance', appearance);
   }, [appearance]);
+
+  useEffect(() => {
+    localStorage.setItem('appearance', appearanceMode);
+  }, [appearanceMode]);
 
   useEffect(() => {
     document.body.classList.add('animal-cursor--force');
@@ -280,6 +305,7 @@ export default function App() {
     const leftOnline = demo ? Boolean(live[left.uuid]) : online.includes(left.uuid);
     const rightOnline = demo ? Boolean(live[right.uuid]) : online.includes(right.uuid);
     if (settings.theme_settings?.offline_nodes_last !== false && leftOnline !== rightOnline) return leftOnline ? -1 : 1;
+    if (sortMode === 'default') return 0;
     const leftLive = live[left.uuid];
     const rightLive = live[right.uuid];
     let difference = 0;
@@ -362,7 +388,7 @@ export default function App() {
   };
 
   const savePreferences = (values: { appearance?: string }) => {
-    if (values.appearance === 'light' || values.appearance === 'dark') setAppearance(values.appearance);
+    if (values.appearance === 'light' || values.appearance === 'dark' || values.appearance === 'system') setAppearanceMode(values.appearance);
     setDrawer(false);
     Notification.success({ message: '偏好已保存', description: '设置已保存在当前浏览器中。' });
   };
@@ -483,8 +509,8 @@ export default function App() {
       </Modal>
 
       <Drawer open={drawer} title="岛屿显示设置" onClose={() => setDrawer(false)} footer={null}>
-        <Form layout="vertical" initialValues={{ appearance }} onFinish={savePreferences} requiredMark="optional">
-          <FormItem label="外观" name="appearance"><Radio direction="vertical" options={[{ value: 'light', label: '白天岛屿' }, { value: 'dark', label: '夜间岛屿' }]} /></FormItem>
+        <Form layout="vertical" initialValues={{ appearance: appearanceMode }} onFinish={savePreferences} requiredMark="optional">
+          <FormItem label="外观" name="appearance"><Radio direction="vertical" options={[{ value: 'system', label: '跟随系统' }, { value: 'light', label: '白天岛屿' }, { value: 'dark', label: '夜间岛屿' }]} /></FormItem>
           <FormItem><Button type="primary" htmlType="submit" block loading={false}>保存偏好</Button></FormItem>
         </Form>
       </Drawer>
